@@ -22,15 +22,21 @@ result = run_simulation_experiment(
     api_key="",  # empty string uses deterministic heuristic fallback
     provider_url="https://api.openai.com/v1",  # OpenAI-compatible provider URL
     model_name="gpt-4o-mini",
+    num_people=3,
     num_days=30,
     meals_per_day=3,
-    strategy_type="LINUCB_WEIGHTED",
+    strategy_types=["LINUCB_WEIGHTED", "LINUCB_CONSTRAINED", "STATIC_LEXICOGRAPHIC", "SAC_PARETO"],
+    persona_parameters=[
+        {"preferred_tags": ["fresh", "quick", "high-protein"], "big_five": {"conscientiousness": 0.85}},
+        {"preferred_tags": ["comfort", "pasta", "sweet"], "big_five": {"neuroticism": 0.70}},
+        {"preferred_tags": ["vegetarian", "soup", "low-sodium"], "historical_mean_rating": 4.4},
+    ],
     seed=42,
 )
 print(result["metrics_summary"])
 ```
 
-The main entrypoint accepts an explicit OpenAI-compatible `provider_url` (or the backward-compatible `base_url`) and returns a structured dictionary containing configuration, execution logs, metrics summary, and full trajectory history. The module generates a deterministic Food.com-like dataset when a real export is unavailable, making it suitable for Google Colab smoke tests without external data downloads. The returned `execution_logs.audit_checklist` records the implemented experimental-design requirements.
+The main entrypoint accepts an explicit OpenAI-compatible `provider_url` (or the backward-compatible `base_url`), a `num_people` count, optional fixed `persona_parameters`, and one or more `strategy_types`. It returns a structured dictionary containing personas, daily contexts, aggregate metrics, per-strategy metrics, per-person/per-strategy metrics, execution logs, and full trajectory history. The module generates a deterministic Food.com-like dataset when a real export is unavailable, making it suitable for Google Colab smoke tests without external data downloads. The returned `execution_logs.audit_checklist` records the implemented experimental-design requirements.
 
 ## Test only the taste / pleasure model
 
