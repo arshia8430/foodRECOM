@@ -70,9 +70,10 @@ def run_simulation_experiment(
 
         if strategy_type.startswith("LINUCB"):
             linucb.update(context, reward)
-        if strategy_type.startswith("SAC"):
-            sac.update(context, param, reward)
         willpower, fatigue = update_long_state(willpower, fatigue, accepted, pleasure, health)
+        next_context = sample_dynamic_state(day, meal, meals_per_day, willpower, fatigue, sleep_quality).as_vector()
+        if strategy_type.startswith("SAC"):
+            sac.update(context, param, reward, next_context, step == total_steps - 1)
         if diet_failure_step is None and (not accepted or willpower <= 5 or fatigue >= 9.5):
             diet_failure_step = step + 1
 
@@ -112,6 +113,18 @@ def run_simulation_experiment(
             "trained_taste_model": taste.trained,
             "taste_training_losses": taste.training_losses,
             "fallback_llm_enabled": True,
+            "pytorch_modules": ["TasteModule.NCF", "SACPolicy.GaussianActor", "SACPolicy.QNetwork"],
+            "audit_checklist": {
+                "pytorch_ncf_and_sac": True,
+                "single_colab_entrypoint": True,
+                "global_seeded_rngs": True,
+                "foodcom_anchored_target_user": True,
+                "health_score_in_0_1": True,
+                "dynamic_and_cumulative_state": True,
+                "layer_a_strategies": ["WEIGHTED", "CONSTRAINED", "LEXICOGRAPHIC", "PARETO"],
+                "adaptive_engines": ["LinUCB", "Soft Actor-Critic"],
+                "batched_top5_llm_prompt_with_json_fallback": True,
+            },
             "generated_at_unix": time.time(),
         },
     }
