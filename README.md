@@ -20,6 +20,8 @@ from foodrecom import run_simulation_experiment
 
 result = run_simulation_experiment(
     api_key="",  # empty string uses deterministic heuristic fallback
+    provider_url="https://api.openai.com/v1",  # OpenAI-compatible provider URL
+    model_name="gpt-4o-mini",
     num_days=30,
     meals_per_day=3,
     strategy_type="LINUCB_WEIGHTED",
@@ -28,7 +30,7 @@ result = run_simulation_experiment(
 print(result["metrics_summary"])
 ```
 
-The main entrypoint returns a structured dictionary containing configuration, execution logs, metrics summary, and full trajectory history. The module generates a deterministic Food.com-like dataset when a real export is unavailable, making it suitable for Google Colab smoke tests without external data downloads. The returned `execution_logs.audit_checklist` records the implemented experimental-design requirements.
+The main entrypoint accepts an explicit OpenAI-compatible `provider_url` (or the backward-compatible `base_url`) and returns a structured dictionary containing configuration, execution logs, metrics summary, and full trajectory history. The module generates a deterministic Food.com-like dataset when a real export is unavailable, making it suitable for Google Colab smoke tests without external data downloads. The returned `execution_logs.audit_checklist` records the implemented experimental-design requirements.
 
 ## Test only the taste / pleasure model
 

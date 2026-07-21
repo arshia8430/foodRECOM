@@ -25,6 +25,7 @@ def run_simulation_experiment(
     strategy_type: str = "LINUCB_WEIGHTED",
     target_user_id: str = "food_com_user_10842",
     seed: int = 42,
+    provider_url: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute the adaptive LLM-persona food recommendation loop."""
     set_global_seed(seed)
@@ -35,7 +36,8 @@ def run_simulation_experiment(
 
     taste = TasteModule(users, recipes, seed)
     taste.train_from_interactions(interactions)
-    persona = LLMPersonaClient(api_key, base_url, model_name)
+    effective_provider_url = provider_url or base_url
+    persona = LLMPersonaClient(api_key, effective_provider_url, model_name)
     linucb = LinUCBPolicy(context_dim=6, actions=[0.2, 0.35, 0.5, 0.65, 0.8])
     sac = SACPolicy(state_dim=6, seed=seed)
 
@@ -60,7 +62,7 @@ def run_simulation_experiment(
         else:
             param = 0.5
 
-        candidates = rank_candidates(recipes, taste, target_user_id, strategy_type, param)
+        candidates = rank_candidates(recipes, taste, target_user_id, strategy_type, param, user_profile=user)
         choice = persona.choose(user, state, candidates)
         accepted = choice.get("action") == "ACCEPTED" and choice.get("selected_recipe_id") is not None
         selected = next((c for c in candidates if c["recipe_id"] == choice.get("selected_recipe_id")), None)
@@ -106,12 +108,17 @@ def run_simulation_experiment(
             "strategy_type": strategy_type,
             "target_user_id": target_user_id,
             "seed": seed,
+            "provider_url": effective_provider_url,
+            "model_name": model_name,
         },
         "metrics_summary": metrics,
         "trajectory_history": trajectory,
         "execution_logs": {
             "trained_taste_model": taste.trained,
             "taste_training_losses": taste.training_losses,
+            "provider_url_used": persona.provider_url,
+            "chat_completions_url": persona.chat_completions_url,
+            "llm_call_stats": persona.stats.__dict__,
             "fallback_llm_enabled": True,
             "pytorch_modules": ["TasteModule.NCF", "SACPolicy.GaussianActor", "SACPolicy.QNetwork"],
             "audit_checklist": {
