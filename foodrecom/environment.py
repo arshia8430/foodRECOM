@@ -50,9 +50,9 @@ def sample_dynamic_state(day: int, meal: int, meals_per_day: int, willpower: flo
 
 def update_long_state(willpower: float, fatigue: float, accepted: bool, taste_score: float, health_score: float) -> Tuple[float, float]:
     if not accepted:
-        return max(0.0, willpower - 5.0), min(10.0, fatigue + 0.8)
+        return max(0.0, willpower - 8.0), min(10.0, fatigue + 1.0)
     strict = health_score > 0.72 and taste_score < 0.55
     indulgent = taste_score > 0.75
-    willpower += -8.0 if strict else 4.0 if indulgent else 0.5
+    willpower += -5.0 if strict else 4.0 if indulgent else 0.5
     fatigue += 0.7 if strict else -0.5 if indulgent else -0.1
     return float(np.clip(willpower, 0, 100)), float(np.clip(fatigue, 0, 10))

@@ -93,12 +93,14 @@ class Transition:
 class SACPolicy:
     """Compact PyTorch Soft Actor-Critic policy for stateful adaptation."""
 
-    def __init__(self, state_dim: int, seed: int, gamma: float = 0.97, tau: float = 0.02, alpha: float = 0.15):
+    def __init__(self, state_dim: int, seed: int, gamma: float = 0.97, tau: float = 0.02, alpha: float = 0.15, min_replay_size: int = 2):
         torch.manual_seed(seed)
         self.rng = np.random.default_rng(seed)
         self.gamma = gamma
         self.tau = tau
         self.alpha = alpha
+        self.min_replay_size = max(1, int(min_replay_size))
+        self.gradient_updates = 0
         self.actor = GaussianActor(state_dim)
         self.q1 = QNetwork(state_dim)
         self.q2 = QNetwork(state_dim)
@@ -121,7 +123,7 @@ class SACPolicy:
         if next_state is None:
             next_state = state
         self.memory.append(Transition(state.copy(), float(action), float(reward), next_state.copy(), bool(done)))
-        if len(self.memory) < 8:
+        if len(self.memory) < self.min_replay_size:
             return
         batch_size = min(64, len(self.memory))
         idx = self.rng.choice(len(self.memory), size=batch_size, replace=False)
@@ -145,6 +147,7 @@ class SACPolicy:
         actor_loss = (self.alpha * logp - torch.min(self.q1(states, sampled_actions), self.q2(states, sampled_actions))).mean()
         self.actor_opt.zero_grad(); actor_loss.backward(); self.actor_opt.step()
         self.last_loss = float((q1_loss + q2_loss + actor_loss).item())
+        self.gradient_updates += 1
 
         with torch.no_grad():
             for target, source in [(self.target_q1, self.q1), (self.target_q2, self.q2)]:
