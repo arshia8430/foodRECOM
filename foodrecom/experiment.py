@@ -76,12 +76,12 @@ def _initial_policy(strategy: str, seed: int) -> LinUCBPolicy | SACPolicy | None
 
 
 def _select_policy_param(strategy: str, policy: LinUCBPolicy | SACPolicy | None, context: np.ndarray) -> float:
+    if "CONSTRAINED" in strategy and not isinstance(policy, LinUCBPolicy):
+        return 0.65
     if strategy.startswith("LINUCB") and isinstance(policy, LinUCBPolicy):
         return policy.select(context)
     if strategy.startswith("SAC") and isinstance(policy, SACPolicy):
         return policy.select(context)
-    if "CONSTRAINED" in strategy:
-        return 0.65
     if "PARETO" in strategy:
         return 0.5
     return 0.5
@@ -111,6 +111,9 @@ def run_simulation_experiment(
     num_people: int = 1,
     persona_parameters: Optional[Sequence[Dict[str, Any]]] = None,
     strategy_types: Optional[Sequence[str]] = None,
+    allow_heuristic_fallback: bool = True,
+    llm_max_retries: int = 2,
+    llm_retry_backoff_s: float = 0.5,
 ) -> Dict[str, Any]:
     """Execute a multi-person, multi-strategy LLM-persona food simulation.
 
@@ -120,6 +123,9 @@ def run_simulation_experiment(
     3. For every person, meal, and strategy, generate Top-5 recommendations.
     4. Ask the LLM persona client to accept one candidate or reject all.
     5. Update strategy-specific cumulative states and compute final metrics.
+
+    Set ``allow_heuristic_fallback=False`` to require real provider-backed LLM
+    outputs and fail fast instead of using the deterministic fallback.
     """
     set_global_seed(seed)
     strategies = _as_strategy_list(strategy_type, strategy_types)
@@ -129,7 +135,14 @@ def run_simulation_experiment(
     taste = TasteModule(users, recipes, seed)
     taste.train_from_interactions(interactions)
     effective_provider_url = provider_url or base_url
-    persona = LLMPersonaClient(api_key, effective_provider_url, model_name)
+    persona = LLMPersonaClient(
+        api_key,
+        effective_provider_url,
+        model_name,
+        max_retries=llm_max_retries,
+        retry_backoff_s=llm_retry_backoff_s,
+        allow_heuristic_fallback=allow_heuristic_fallback,
+    )
 
     policy_state: Dict[tuple[str, str], Dict[str, Any]] = {}
     for person_index, user in enumerate(people):
@@ -139,6 +152,7 @@ def run_simulation_experiment(
                 "fatigue": 0.0,
                 "diet_failure_step": None,
                 "policy": _initial_policy(strategy, seed + person_index * 997 + strategy_index * 37),
+                "pending_sac_transition": None,
             }
 
     daily_contexts: List[Dict[str, Any]] = []
@@ -166,6 +180,10 @@ def run_simulation_experiment(
                     )
                     context = state.as_vector()
                     policy = state_record["policy"]
+                    pending = state_record.get("pending_sac_transition")
+                    if pending is not None and isinstance(policy, SACPolicy):
+                        policy.update(pending["state"], pending["action"], pending["reward"], context, False)
+                        state_record["pending_sac_transition"] = None
                     param = _select_policy_param(strategy, policy, context)
                     candidates = rank_candidates(recipes, taste, user.user_id, strategy, param, user_profile=user)
                     choice = persona.choose(user, state, candidates)
@@ -178,9 +196,11 @@ def run_simulation_experiment(
                     if strategy.startswith("LINUCB") and isinstance(policy, LinUCBPolicy):
                         policy.update(context, reward)
                     next_willpower, next_fatigue = update_long_state(float(state_record["willpower"]), float(state_record["fatigue"]), accepted, pleasure, health)
-                    next_context = sample_dynamic_state(day, meal, meals_per_day, next_willpower, next_fatigue, per_person_sleep[user.user_id]).as_vector()
                     if strategy.startswith("SAC") and isinstance(policy, SACPolicy):
-                        policy.update(context, param, reward, next_context, meal_step == total_meals)
+                        if meal_step == total_meals:
+                            policy.update(context, param, reward, context, True)
+                        else:
+                            state_record["pending_sac_transition"] = {"state": context, "action": param, "reward": reward}
                     state_record["willpower"] = next_willpower
                     state_record["fatigue"] = next_fatigue
                     if state_record["diet_failure_step"] is None and (not accepted or next_willpower <= 5 or next_fatigue >= 9.5):
@@ -209,6 +229,18 @@ def run_simulation_experiment(
                         }
                     )
 
+    sac_training_status: Dict[str, Dict[str, Any]] = {}
+    for (user_id, strategy), state_record in policy_state.items():
+        policy = state_record["policy"]
+        if isinstance(policy, SACPolicy):
+            key = f"{user_id}:{strategy}"
+            sac_training_status[key] = {
+                "replay_size": len(policy.memory),
+                "min_replay_size": policy.min_replay_size,
+                "gradient_updates": policy.gradient_updates,
+                "trained": policy.gradient_updates > 0,
+            }
+
     per_person_strategy_metrics: Dict[str, Dict[str, Any]] = {}
     for user in people:
         per_person_strategy_metrics[user.user_id] = {}
@@ -234,6 +266,9 @@ def run_simulation_experiment(
             "seed": seed,
             "provider_url": effective_provider_url,
             "model_name": model_name,
+            "allow_heuristic_fallback": allow_heuristic_fallback,
+            "llm_max_retries": llm_max_retries,
+            "llm_retry_backoff_s": llm_retry_backoff_s,
         },
         "personas": [
             {
@@ -249,28 +284,52 @@ def run_simulation_experiment(
         "per_strategy_metrics": per_strategy_metrics,
         "per_person_strategy_metrics": per_person_strategy_metrics,
         "trajectory_history": trajectory,
+        "llm_outputs": [
+            {
+                "global_step": row["global_step"],
+                "meal_step": row["meal_step"],
+                "day": row["day"],
+                "meal": row["meal"],
+                "person_index": row["person_index"],
+                "user_id": row["user_id"],
+                "strategy_type": row["strategy_type"],
+                "choice": row["llm_choice"],
+            }
+            for row in trajectory
+        ],
         "execution_logs": {
             "trained_taste_model": taste.trained,
             "taste_training_losses": taste.training_losses,
             "provider_url_used": persona.provider_url,
             "chat_completions_url": persona.chat_completions_url,
             "llm_call_stats": persona.stats.__dict__,
-            "fallback_llm_enabled": True,
+            "fallback_llm_enabled": allow_heuristic_fallback,
             "pytorch_modules": ["TasteModule.NCF", "SACPolicy.GaussianActor", "SACPolicy.QNetwork"],
+            "sac_training_status": sac_training_status,
+            "sac_training_warnings": [
+                f"{key} did not cross SAC warm-up threshold; no gradient updates were run."
+                for key, status in sac_training_status.items()
+                if not status["trained"]
+            ],
             "audit_checklist": {
-                "multi_person_fixed_personas": True,
-                "daily_and_per_meal_variable_state": True,
-                "strategy_evaluation_for_each_person_and_meal": True,
-                "llm_accept_reject_per_strategy": True,
-                "pytorch_ncf_and_sac": True,
+                "multi_person_fixed_personas": len(people) == num_people,
+                "daily_and_per_meal_variable_state": len(daily_contexts) == num_days,
+                "strategy_evaluation_for_each_person_and_meal": len(trajectory) == len(people) * len(strategies) * total_meals,
+                "llm_accept_reject_per_strategy": all("llm_choice" in row for row in trajectory),
+                "llm_outputs_exposed": all("llm_choice" in row and row["llm_choice"].get("source") for row in trajectory),
+                "llm_api_success_observed": persona.stats.api_calls_succeeded > 0,
+                "heuristic_fallback_observed": persona.stats.fallback_calls > 0,
+                "no_silent_fake_llm_outputs": all(row["llm_choice"].get("source") == "llm" for row in trajectory) if not allow_heuristic_fallback else all(row["llm_choice"].get("source") in {"llm", "heuristic_fallback"} for row in trajectory),
+                "pytorch_ncf_and_sac": taste.trained and any(isinstance(s["policy"], SACPolicy) for s in policy_state.values()),
                 "single_colab_entrypoint": True,
                 "global_seeded_rngs": True,
-                "foodcom_anchored_target_user": True,
-                "health_score_in_0_1": True,
-                "dynamic_and_cumulative_state": True,
+                "foodcom_anchored_target_user": any(user.user_id == target_user_id for user in people),
+                "health_score_in_0_1": all(0.0 <= row["health"] <= 1.0 for row in trajectory),
+                "dynamic_and_cumulative_state": all("next_willpower_bank" in row and "next_diet_fatigue" in row for row in trajectory),
+                "sac_crossed_warmup_threshold": all(status["trained"] for status in sac_training_status.values()) if sac_training_status else None,
                 "layer_a_strategies": ["WEIGHTED", "CONSTRAINED", "LEXICOGRAPHIC", "PARETO"],
                 "adaptive_engines": ["LinUCB", "Soft Actor-Critic"],
-                "batched_top5_llm_prompt_with_json_fallback": True,
+                "batched_top5_llm_prompt_with_json_fallback": persona.stats.api_calls_attempted + persona.stats.fallback_calls > 0,
             },
             "generated_at_unix": time.time(),
         },
