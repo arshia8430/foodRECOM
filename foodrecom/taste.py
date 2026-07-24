@@ -20,7 +20,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from .data import Recipe, UserProfile, build_synthetic_foodcom
+from .data import Recipe, UserProfile, build_synthetic_foodcom, load_real_foodcom
 from .utils import set_global_seed
 
 
@@ -306,11 +306,18 @@ def train_and_preview_taste_model(
     epochs: int = 15, 
     target_user_id: str = "food_com_user_10842", 
     top_k: int = 5,
-    save_path: Optional[str] = None
+    save_path: Optional[str] = None,
+    data_dir: str ='./',
+    n_users: int =10**10,
+    n_recipes: int=10**10
 ) -> Dict[str, object]:
     """Convenience function for testing the pleasure model independently."""
     set_global_seed(seed)
-    users, recipes, interactions = build_synthetic_foodcom(seed)
+    users, recipes, interactions = load_real_foodcom(seed=seed,
+                                                     recipes_path=data_dir,
+                                                     ratings_path=data_dir,
+                                                     n_users=n_users,
+                                                     n_recipes=n_recipes)
     
     if target_user_id not in {u.user_id for u in users}:
         target_user_id = users[0].user_id
