@@ -111,6 +111,9 @@ def run_simulation_experiment(
     num_people: int = 1,
     persona_parameters: Optional[Sequence[Dict[str, Any]]] = None,
     strategy_types: Optional[Sequence[str]] = None,
+    allow_heuristic_fallback: bool = True,
+    llm_max_retries: int = 2,
+    llm_retry_backoff_s: float = 0.5,
 ) -> Dict[str, Any]:
     """Execute a multi-person, multi-strategy LLM-persona food simulation.
 
@@ -120,6 +123,9 @@ def run_simulation_experiment(
     3. For every person, meal, and strategy, generate Top-5 recommendations.
     4. Ask the LLM persona client to accept one candidate or reject all.
     5. Update strategy-specific cumulative states and compute final metrics.
+
+    Set ``allow_heuristic_fallback=False`` to require real provider-backed LLM
+    outputs and fail fast instead of using the deterministic fallback.
     """
     set_global_seed(seed)
     strategies = _as_strategy_list(strategy_type, strategy_types)
@@ -129,7 +135,14 @@ def run_simulation_experiment(
     taste = TasteModule(users, recipes, seed)
     taste.train_from_interactions(interactions)
     effective_provider_url = provider_url or base_url
-    persona = LLMPersonaClient(api_key, effective_provider_url, model_name)
+    persona = LLMPersonaClient(
+        api_key,
+        effective_provider_url,
+        model_name,
+        max_retries=llm_max_retries,
+        retry_backoff_s=llm_retry_backoff_s,
+        allow_heuristic_fallback=allow_heuristic_fallback,
+    )
 
     policy_state: Dict[tuple[str, str], Dict[str, Any]] = {}
     for person_index, user in enumerate(people):
@@ -253,6 +266,9 @@ def run_simulation_experiment(
             "seed": seed,
             "provider_url": effective_provider_url,
             "model_name": model_name,
+            "allow_heuristic_fallback": allow_heuristic_fallback,
+            "llm_max_retries": llm_max_retries,
+            "llm_retry_backoff_s": llm_retry_backoff_s,
         },
         "personas": [
             {
@@ -268,13 +284,26 @@ def run_simulation_experiment(
         "per_strategy_metrics": per_strategy_metrics,
         "per_person_strategy_metrics": per_person_strategy_metrics,
         "trajectory_history": trajectory,
+        "llm_outputs": [
+            {
+                "global_step": row["global_step"],
+                "meal_step": row["meal_step"],
+                "day": row["day"],
+                "meal": row["meal"],
+                "person_index": row["person_index"],
+                "user_id": row["user_id"],
+                "strategy_type": row["strategy_type"],
+                "choice": row["llm_choice"],
+            }
+            for row in trajectory
+        ],
         "execution_logs": {
             "trained_taste_model": taste.trained,
             "taste_training_losses": taste.training_losses,
             "provider_url_used": persona.provider_url,
             "chat_completions_url": persona.chat_completions_url,
             "llm_call_stats": persona.stats.__dict__,
-            "fallback_llm_enabled": True,
+            "fallback_llm_enabled": allow_heuristic_fallback,
             "pytorch_modules": ["TasteModule.NCF", "SACPolicy.GaussianActor", "SACPolicy.QNetwork"],
             "sac_training_status": sac_training_status,
             "sac_training_warnings": [
@@ -287,8 +316,10 @@ def run_simulation_experiment(
                 "daily_and_per_meal_variable_state": len(daily_contexts) == num_days,
                 "strategy_evaluation_for_each_person_and_meal": len(trajectory) == len(people) * len(strategies) * total_meals,
                 "llm_accept_reject_per_strategy": all("llm_choice" in row for row in trajectory),
+                "llm_outputs_exposed": all("llm_choice" in row and row["llm_choice"].get("source") for row in trajectory),
                 "llm_api_success_observed": persona.stats.api_calls_succeeded > 0,
                 "heuristic_fallback_observed": persona.stats.fallback_calls > 0,
+                "no_silent_fake_llm_outputs": all(row["llm_choice"].get("source") == "llm" for row in trajectory) if not allow_heuristic_fallback else all(row["llm_choice"].get("source") in {"llm", "heuristic_fallback"} for row in trajectory),
                 "pytorch_ncf_and_sac": taste.trained and any(isinstance(s["policy"], SACPolicy) for s in policy_state.values()),
                 "single_colab_entrypoint": True,
                 "global_seeded_rngs": True,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence
 
@@ -32,16 +33,31 @@ class PersonaCallStats:
     api_calls_succeeded: int = 0
     fallback_calls: int = 0
     malformed_responses: int = 0
+    api_call_errors: int = 0
+    validation_failures: int = 0
+    retries_attempted: int = 0
 
 
 class LLMPersonaClient:
     """OpenAI-compatible stateless LLM persona evaluator."""
 
-    def __init__(self, api_key: str, provider_url: str, model_name: str, timeout_s: int = 30):
+    def __init__(
+        self,
+        api_key: str,
+        provider_url: str,
+        model_name: str,
+        timeout_s: int = 30,
+        max_retries: int = 2,
+        retry_backoff_s: float = 0.5,
+        allow_heuristic_fallback: bool = True,
+    ):
         self.api_key = api_key
         self.provider_url = self._normalize_provider_url(provider_url)
         self.model_name = model_name
         self.timeout_s = timeout_s
+        self.max_retries = max(0, int(max_retries))
+        self.retry_backoff_s = max(0.0, float(retry_backoff_s))
+        self.allow_heuristic_fallback = bool(allow_heuristic_fallback)
         self.stats = PersonaCallStats()
 
     @staticmethod
@@ -57,30 +73,48 @@ class LLMPersonaClient:
         return f"{self.provider_url}/chat/completions"
 
     def choose(self, user: UserProfile, state: DynamicState, candidates: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Evaluate all Top-5 candidates in one stateless prompt and return JSON-like output."""
+        """Evaluate all Top-5 candidates in one stateless prompt and return an audited decision."""
         if not candidates:
             return self._fallback(state, candidates, "No candidates supplied.")
         if not self.api_key:
             return self._fallback(state, candidates, "No API key supplied.")
 
-        self.stats.api_calls_attempted += 1
         request_json = self._build_request(user, state, candidates)
-        try:
-            response = requests.post(
-                self.chat_completions_url,
-                headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-                json=request_json,
-                timeout=self.timeout_s,
-            )
-            response.raise_for_status()
-            content = self._extract_content(response.json())
-            parsed = self._parse_json_object(content)
-            validated = self._validate_choice(parsed, candidates)
-            self.stats.api_calls_succeeded += 1
-            return validated
-        except Exception as exc:
-            self.stats.malformed_responses += 1
-            return self._fallback(state, candidates, f"LLM fallback: {exc}")
+        last_error: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            if attempt > 0:
+                self.stats.retries_attempted += 1
+                if self.retry_backoff_s:
+                    time.sleep(self.retry_backoff_s * (2 ** (attempt - 1)))
+            self.stats.api_calls_attempted += 1
+            try:
+                response = requests.post(
+                    self.chat_completions_url,
+                    headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
+                    json=request_json,
+                    timeout=self.timeout_s,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                content = self._extract_content(payload)
+                parsed = self._parse_json_object(content)
+                validated = self._validate_choice(parsed, candidates)
+                self.stats.api_calls_succeeded += 1
+                validated["raw_llm_content"] = content
+                validated["raw_provider_response"] = payload
+                validated["attempt_number"] = attempt + 1
+                return validated
+            except requests.RequestException as exc:
+                self.stats.api_call_errors += 1
+                last_error = exc
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self.stats.validation_failures += 1
+                self.stats.malformed_responses += 1
+                last_error = exc
+                break
+
+        reason = f"LLM fallback: {last_error}" if last_error else "LLM fallback: unknown provider failure"
+        return self._fallback(state, candidates, reason)
 
     def _build_request(self, user: UserProfile, state: DynamicState, candidates: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         prompt = {
@@ -170,6 +204,8 @@ class LLMPersonaClient:
         }
 
     def _fallback(self, state: DynamicState, candidates: List[Dict[str, Any]], reason: str) -> Dict[str, Any]:
+        if not self.allow_heuristic_fallback:
+            raise RuntimeError(reason)
         self.stats.fallback_calls += 1
         return self._heuristic(state, candidates, reason)
 

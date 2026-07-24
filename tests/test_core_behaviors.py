@@ -58,3 +58,59 @@ def test_short_sac_experiment_records_real_training_status():
     assert statuses
     assert all(status["replay_size"] == 4 for status in statuses.values())
     assert all(status["trained"] for status in statuses.values())
+
+
+def test_persona_strict_mode_raises_instead_of_fallback_without_key():
+    user = UserProfile("u1", {"neuroticism": 0.5}, ["quick"], np.zeros(12, dtype=np.float32), 4.0)
+    state = DynamicState(1, 1, 5, 22, 6, 7, 100, 0)
+    client = LLMPersonaClient(
+        api_key="",
+        provider_url="https://example.test/v1",
+        model_name="test",
+        allow_heuristic_fallback=False,
+    )
+    try:
+        client.choose(user, state, [{"recipe_id": "r1", "taste": 0.8, "health": 0.8}])
+    except RuntimeError as exc:
+        assert "No API key supplied" in str(exc)
+    else:
+        raise AssertionError("strict LLM mode should raise instead of creating a fallback output")
+
+
+def test_experiment_exposes_llm_outputs_and_fallback_provenance():
+    result = run_simulation_experiment(api_key="", num_days=1, meals_per_day=1, strategy_type="STATIC_LEXICOGRAPHIC", num_people=1, seed=9)
+    outputs = result["llm_outputs"]
+    assert len(outputs) == result["metrics_summary"]["total_llm_decisions"]
+    assert outputs[0]["choice"]["source"] == "heuristic_fallback"
+    assert result["execution_logs"]["audit_checklist"]["llm_outputs_exposed"] is True
+    assert result["execution_logs"]["audit_checklist"]["no_silent_fake_llm_outputs"] is True
+
+
+def test_persona_success_returns_raw_provider_output(monkeypatch):
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"selected_recipe_id":"r1","action":"ACCEPTED","perceived_satisfaction":0.9,"rationale":"fits"}'
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*args, **kwargs):
+        return Response()
+
+    monkeypatch.setattr("foodrecom.persona.requests.post", fake_post)
+    user = UserProfile("u1", {"neuroticism": 0.5}, ["quick"], np.zeros(12, dtype=np.float32), 4.0)
+    state = DynamicState(1, 1, 5, 22, 6, 7, 100, 0)
+    client = LLMPersonaClient(api_key="key", provider_url="https://example.test/v1", model_name="test", retry_backoff_s=0)
+    choice = client.choose(user, state, [{"recipe_id": "r1", "taste": 0.8, "health": 0.8}])
+    assert choice["source"] == "llm"
+    assert choice["raw_llm_content"]
+    assert choice["raw_provider_response"]["choices"]
+    assert client.stats.api_calls_succeeded == 1
