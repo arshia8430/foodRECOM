@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import csv
 import os
-import urllib.request
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
-from .health import HealthModule
-
 import numpy as np
 
 
@@ -105,6 +102,8 @@ def load_real_foodcom(
                     tags=tags_list,
                     latent=rng.normal(size=12).astype(np.float32),
                 )
+                from .health import HealthModule
+
                 recipe.health_score = HealthModule.score(recipe)
                 recipes.append(recipe)
                 recipe_lookup[rec_id] = recipe
@@ -178,14 +177,20 @@ def build_synthetic_foodcom(
 ) -> Tuple[List[UserProfile], List[Recipe], List[Tuple[str, str, float]]]:
     """Build a deterministic Food.com-like catalogue, users, and rating table."""
     
-    # Step 1: Check directory and attempt downloading/loading real data
-    recipes_path, ratings_path = ensure_data_directory("data")
-    real_data = load_real_foodcom(recipes_path, ratings_path, seed, n_users, n_recipes)
-    
-    if real_data is not None:
-        return real_data
+    # Step 1: Use local Food.com data when available; otherwise keep the
+    # synthetic fallback runnable for tests and examples.
+    try:
+        recipes_path, ratings_path = ensure_data_directory("data")
+    except FileNotFoundError as exc:
+        print(f"[Data Pipeline] Note: Falling back to synthetic generation ({exc}).")
+    else:
+        real_data = load_real_foodcom(recipes_path, ratings_path, seed, n_users, n_recipes)
+        if real_data is not None:
+            return real_data
 
     # Step 2: Synthetic Generator Fallback (Preserved original shell)
+
+    from .health import HealthModule
 
     rng = np.random.default_rng(seed)
     tags = ["comfort", "quick", "vegetarian", "spicy", "sweet", "high-protein", "low-sodium", "fresh", "pasta", "soup"]

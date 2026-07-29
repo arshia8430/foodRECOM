@@ -20,7 +20,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from .data import Recipe, UserProfile, build_synthetic_foodcom, load_real_foodcom
+from .data import Recipe, UserProfile, build_synthetic_foodcom, ensure_data_directory, load_real_foodcom
 from .utils import set_global_seed
 
 
@@ -308,17 +308,29 @@ def train_and_preview_taste_model(
     top_k: int = 5,
     save_path: Optional[str] = None,
     data_dir: str ='./',
-    n_users: int =10**10,
-    n_recipes: int=10**10
+    n_users: int = 80,
+    n_recipes: int = 350
 ) -> Dict[str, object]:
     """Convenience function for testing the pleasure model independently."""
     set_global_seed(seed)
-    users, recipes, interactions = load_real_foodcom(seed=seed,
-                                                     recipes_path=data_dir,
-                                                     ratings_path=data_dir,
-                                                     n_users=n_users,
-                                                     n_recipes=n_recipes)
-    
+    try:
+        recipes_path, ratings_path = ensure_data_directory(data_dir)
+    except FileNotFoundError as exc:
+        print(f"[Data Pipeline] Note: Falling back to synthetic generation ({exc}).")
+        users, recipes, interactions = build_synthetic_foodcom(seed=seed, n_users=n_users, n_recipes=n_recipes)
+    else:
+        real_data = load_real_foodcom(
+            recipes_path=recipes_path,
+            ratings_path=ratings_path,
+            seed=seed,
+            n_users=n_users,
+            n_recipes=n_recipes,
+        )
+        if real_data is None:
+            users, recipes, interactions = build_synthetic_foodcom(seed=seed, n_users=n_users, n_recipes=n_recipes)
+        else:
+            users, recipes, interactions = real_data
+
     if target_user_id not in {u.user_id for u in users}:
         target_user_id = users[0].user_id
 
